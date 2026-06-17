@@ -6,7 +6,7 @@ Free for educational and personal use. Contains 6.9 million reviews across 150,0
 
 ### Download
 1. Go to: https://www.yelp.com/dataset
-2. Click "Download Dataset" — free Yelp account required
+2. Click "Download Dataset" - free Yelp account required
 3. Download the TAR file (~4.35 GB compressed, ~8.65 GB extracted)
 
 ### Extract (Mac / Linux)
