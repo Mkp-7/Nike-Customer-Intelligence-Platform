@@ -203,14 +203,18 @@ def load_home_kpis():
 
     kpis["versions"] = rev["version"].nunique() if "version" in rev.columns else "N/A"
 
-    if "date" in rev.columns and not rev["date"].isna().all():
-        valid_dates = rev["date"].dropna()
-        if len(valid_dates) > 0:
-            kpis["date_min"] = valid_dates.min().strftime("%b %Y")
-            kpis["date_max"] = valid_dates.max().strftime("%b %Y")
+    try:
+        if "date" in rev.columns:
+            rev["date"] = pd.to_datetime(rev["date"], errors="coerce")
+            valid_dates = rev["date"].dropna()
+            if len(valid_dates) > 0:
+                kpis["date_min"] = valid_dates.min().strftime("%b %Y")
+                kpis["date_max"] = valid_dates.max().strftime("%b %Y")
+            else:
+                kpis["date_min"] = kpis["date_max"] = "N/A"
         else:
             kpis["date_min"] = kpis["date_max"] = "N/A"
-    else:
+    except Exception:
         kpis["date_min"] = kpis["date_max"] = "N/A"
 
     return kpis
