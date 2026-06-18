@@ -142,34 +142,14 @@ def scrape_location_reviews(keyword):
 
         print(f"   Found {len(results)} locations for '{keyword}'")
 
-        # Debug: print raw first result to see field structure
-        if results:
-            first = results[0]
-            print(f"   DEBUG first result keys: {list(first.keys())}")
-            print(f"   DEBUG gps_coordinates: {first.get('gps_coordinates')}")
-            print(f"   DEBUG latitude direct: {first.get('latitude')}")
-
         for place in results[:5]:  # scrape top 5 matching locations
             data_id       = place.get("data_id", "")
             place_name    = place.get("title", keyword)
             raw_address   = place.get("address", "")
-
-            # SerpAPI returns coordinates in different places depending on query type
-            gps  = place.get("gps_coordinates") or {}
-            lat  = (gps.get("latitude")
-                    or place.get("latitude")
-                    or place.get("lat")
-                    or "")
-            lon  = (gps.get("longitude")
-                    or place.get("longitude")
-                    or place.get("lng")
-                    or place.get("lon")
-                    or "")
-
+            lat           = place.get("gps_coordinates", {}).get("latitude", "")
+            lon           = place.get("gps_coordinates", {}).get("longitude", "")
             google_rating = place.get("rating", "")
             total_reviews = place.get("reviews", "")
-
-            print(f"   GPS raw: {gps} | lat={lat} | lon={lon}")
 
             city, state = parse_address(raw_address)
 
