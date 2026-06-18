@@ -7,18 +7,18 @@ How it works automatically:
 """
 
 # ── Brand Settings (only thing you change) ────────────────────────────────────
-BRAND_NAME   = "Kiss Beauty Group"
+BRAND_NAME   = "Athra Wholesale Jewelry"
 APP_NAME     = BRAND_NAME
-KEYWORDS     = ["Kiss Beauty Group", "Kiss nails", "Kiss lashes", "Kiss beauty", "Kiss impress"]
+KEYWORDS     = ["Athra jewelry", "Athra NJ jewelry", "Athra wholesale jewelry", "Athra Luxe jewelry"]
 
 # ── App Store (leave blank if no app) ────────────────────────────────────────
 APP_STORE_ID = ""
 APP_COUNTRY  = "us"
 
 # ── Platform Branding ─────────────────────────────────────────────────────────
-PLATFORM_TITLE    = "Kiss Beauty Intelligence Platform"
+PLATFORM_TITLE    = "Athra Intelligence Platform"
 PLATFORM_SUBTITLE = "Customer Insights & Operations"
-PLATFORM_ICON     = "💅"
+PLATFORM_ICON     = "💍"
 
 # ── AI Model ──────────────────────────────────────────────────────────────────
 GROQ_MODEL = "llama-3.3-70b-versatile"
