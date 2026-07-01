@@ -130,6 +130,7 @@ PAGES = {
     "map":     "🗺️  Store Pulse Map",
     "test":    "🧪  Test & Learn Autopilot",
     "copilot": "🤖  Analyst Copilot",
+    "merch":   "📋  Merchandising Line Plan",
 }
 PAGE_OPTIONS = list(PAGES.values())
 
@@ -290,6 +291,9 @@ if cur_page == "home":
         ("🤖", "Analyst Copilot",
          "Plain-English chat. Ask 'Which states are trending down?' and get a real answer with numbers - no SQL needed.",
          "AI CHAT", "#f59e0b", "copilot"),
+        ("📋", "Merchandising Line Plan",
+         "Live Nike product catalog with SKU-level pricing, assortment analysis, and one-click Excel export - mirroring MIA line plan work.",
+         "NEW", "#8b5cf6", "merch"),
     ]
 
     col1, col2 = st.columns(2)
@@ -321,4 +325,8 @@ elif cur_page == "test":
 
 elif cur_page == "copilot":
     from module4_analyst_copilot.app import show
+    show()
+    
+elif cur_page == "merch":
+    from module5_merchandising.app import show
     show()
