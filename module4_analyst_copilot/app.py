@@ -164,7 +164,7 @@ Be direct, specific, and use numbers. Under 200 words unless asked for detail.
 
     from google.genai import types
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash",
         contents=full_prompt,
         config=types.GenerateContentConfig(
             max_output_tokens=500,
