@@ -119,7 +119,7 @@ def main():
     all_products = []
 
     print("=" * 55)
-    print("  Nike Catalog Scraper - GitHub Actions")
+    print("  Nike Catalog Scraper — GitHub Actions")
     print("=" * 55)
 
     with sync_playwright() as p:
@@ -218,7 +218,7 @@ def main():
                 products = [parse_product(p, category, gender) for p in api_products]
                 print(f"   Got {len(products)} via API interception")
             else:
-                print("   API not intercepted - trying page extraction...")
+                print("   API not intercepted — trying page extraction...")
                 content = page.content()
                 products = extract_from_json(content, category, gender)
 
@@ -229,7 +229,7 @@ def main():
         browser.close()
 
     if not all_products:
-        # Nike is fully blocking - use a static fallback dataset
+        # Nike is fully blocking — use a static fallback dataset
         print("\n⚠️  Nike blocked all requests.")
         print("   Generating representative sample catalog...")
         all_products = generate_sample_catalog()
