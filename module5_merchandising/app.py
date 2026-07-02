@@ -1,6 +1,6 @@
 """
-Module 5 — Merchandising Line Plan
-Uses Nike's own public API (api.nike.com) — completely free, no key needed.
+Module 5 - Merchandising Line Plan
+Uses Nike's own public API (api.nike.com) - completely free, no key needed.
 Mirrors the work of a Nike Merchandising Information Analyst.
 """
 
@@ -42,7 +42,7 @@ def fetch_nike_category(filter_id: str, count: int = 24) -> list:
         "country": "us",
         "endpoint": endpoint,
         "language": "en",
-        "localizedRangeStr": "{lowestPrice} — {highestPrice}",
+        "localizedRangeStr": "{lowestPrice} - {highestPrice}",
     })
     url = f"{NIKE_API_BASE}?{params}"
     req = urllib.request.Request(url, headers=HEADERS)
@@ -179,7 +179,7 @@ def export_excel(df: pd.DataFrame) -> BytesIO:
 
 def show():
     st.markdown("## 📋 Merchandising Line Plan")
-    st.markdown("Live Nike product catalog via Nike's public API — no API key required. "
+    st.markdown("Live Nike product catalog via Nike's public API - no API key required. "
                 "SKU-level pricing, assortment analysis, and Excel export.")
 
     with st.spinner("Fetching live Nike product data..."):
@@ -212,7 +212,7 @@ def show():
     if sel_status != "All": filtered = filtered[filtered["Status"]==sel_status]
     filtered = filtered[filtered["Retail Price ($)"].between(price_range[0], price_range[1])]
 
-    st.markdown(f"### 🗂️ Line Plan — {len(filtered)} SKUs")
+    st.markdown(f"### 🗂️ Line Plan - {len(filtered)} SKUs")
     st.caption("🟢 New · 🔴 Sale · ⬜ Active · ⚫ Out of Stock")
 
     display_cols = [c for c in ["SKU / Product ID","Product Name","Subtitle",
