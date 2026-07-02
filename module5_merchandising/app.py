@@ -1,10 +1,10 @@
 """
 Module 5 - Merchandising Line Plan
-Uses Nike's own public API (api.nike.com) - completely free, no key needed.
-Mirrors the work of a Nike Merchandising Information Analyst.
+Fetches Nike product data using Nike's public category API.
+No API key required.
 """
 
-import os, sys, json, urllib.request, urllib.parse
+import os, sys, json, urllib.request, urllib.parse, re
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -13,97 +13,154 @@ from io import BytesIO
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-NIKE_API_BASE = "https://api.nike.com/cic/browse/v2"
-
-CATEGORIES = {
-    "Men's Running":    "010794e5-35fe-4e32-aaff-cd2c74f89d61",
-    "Women's Running":  "16633190-45e5-4830-a068-232ac7aea82c",
-    "Men's Basketball": "0f64ecc7-d624-4e91-b171-b83a03dd8550",
-    "Jordan":           "5b6a9350-a3bb-4e8b-b660-f87e64f02700",
-}
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "application/json, text/html, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://www.nike.com",
-    "Referer": "https://www.nike.com/",
+}
+
+# Nike category slugs - used in their public URL structure
+CATEGORY_URLS = {
+    "Men's Shoes":    "https://www.nike.com/w/mens-shoes-nik1zy7ok",
+    "Women's Shoes":  "https://www.nike.com/w/womens-shoes-5e1x6zy7ok",
+    "Jordan Shoes":   "https://www.nike.com/w/jordan-shoes-37eefzy7ok",
+    "Running Shoes":  "https://www.nike.com/w/running-shoes-37v7jzy7ok",
 }
 
 
-def fetch_nike_category(filter_id: str, count: int = 24) -> list:
-    endpoint = (f"/product_feed/rollup_threads/v2"
-                f"?filter=marketplace(US)&filter=language(en)"
-                f"&filter=employeePrice(true)&filter=attributeIds({filter_id})"
-                f"&anchor=0&count={count}")
-    params = urllib.parse.urlencode({
-        "queryid": "products",
-        "anonymousId": "7CC266B713D36CCC7275B33B6E4F9206",
-        "country": "us",
-        "endpoint": endpoint,
-        "language": "en",
-        "localizedRangeStr": "{lowestPrice} - {highestPrice}",
-    })
-    url = f"{NIKE_API_BASE}?{params}"
+def fetch_category_page(url: str) -> list:
+    """Fetch Nike category page and extract product JSON from page source."""
     req = urllib.request.Request(url, headers=HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        return data.get("data", {}).get("products", {}).get("products", [])
+        with urllib.request.urlopen(req, timeout=20) as r:
+            html = r.read().decode("utf-8", errors="ignore")
+
+        # Nike embeds product data as JSON in the page source
+        # Look for the product data in script tags
+        pattern = r'"products":\{"products":\[(.*?)\],"pages"'
+        match = re.search(pattern, html, re.DOTALL)
+        if not match:
+            # Try alternate pattern
+            pattern2 = r'"nodes":\[(.*?)\],"pageInfo"'
+            match = re.search(pattern2, html, re.DOTALL)
+            if not match:
+                return []
+
+        raw = "[" + match.group(1) + "]"
+        products = json.loads(raw)
+        return products if isinstance(products, list) else []
+
     except Exception as ex:
-        st.warning(f"Could not fetch category: {ex}")
         return []
 
 
-def parse_products(raw: list, category_label: str) -> list:
+def parse_page_products(raw: list, category: str) -> list:
+    """Parse products extracted from Nike page HTML."""
     rows = []
     for p in raw:
         if not isinstance(p, dict):
             continue
-        price        = p.get("price") or {}
-        current_p    = price.get("currentPrice") or price.get("fullPrice") or ""
-        full_p       = price.get("fullPrice") or current_p
-        in_stock     = p.get("inStock", True)
-        label        = str(p.get("label", ""))
-        on_sale      = False
         try:
-            on_sale = float(str(current_p).replace(",","") or 0) < float(str(full_p).replace(",","") or 0)
+            price     = p.get("price", {}) or {}
+            cur_price = price.get("currentPrice", "") or price.get("fullPrice", "")
+            full_price= price.get("fullPrice", cur_price)
+            pid       = p.get("pid", "") or p.get("id", "")
+            title     = p.get("title", "") or p.get("name", "")
+            subtitle  = p.get("subtitle", "")
+            colorway  = p.get("colorDescription", "")
+            in_stock  = p.get("inStock", True)
+            label     = str(p.get("label", ""))
+
+            on_sale = False
+            try:
+                on_sale = float(str(cur_price).replace(",","") or 0) < float(str(full_price).replace(",","") or 1)
+            except Exception:
+                pass
+
+            if "New" in label or "Just In" in label:
+                status = "NEW"
+            elif on_sale:
+                status = "SALE"
+            elif not in_stock:
+                status = "OUT OF STOCK"
+            else:
+                status = "ACTIVE"
+
+            gender = "Men" if "Men" in category else "Women" if "Women" in category else "Unisex"
+
+            rows.append({
+                "SKU / Product ID":  pid,
+                "Product Name":      title,
+                "Subtitle":          subtitle,
+                "Colorway":          colorway,
+                "Gender":            gender,
+                "Category":          category,
+                "Retail Price ($)":  cur_price,
+                "Full Price ($)":    full_price,
+                "Status":            status,
+                "In Stock":          "✅" if in_stock else "❌",
+            })
         except Exception:
-            pass
-        if "New" in label:      status = "NEW"
-        elif on_sale:           status = "SALE"
-        elif not in_stock:      status = "OUT OF STOCK"
-        else:                   status = "ACTIVE"
-        gender = "Men" if "Men" in category_label else "Women" if "Women" in category_label else "Unisex"
-        url = str(p.get("url", "")).replace("{countryLang}", "https://www.nike.com")
-        rows.append({
-            "SKU / Product ID":  p.get("pid", ""),
-            "Product Name":      p.get("title", ""),
-            "Subtitle":          p.get("subtitle", ""),
-            "Colorway":          p.get("colorDescription", ""),
-            "Gender":            gender,
-            "Category":          category_label,
-            "Retail Price ($)":  current_p,
-            "Full Price ($)":    full_p,
-            "Status":            status,
-            "In Stock":          "✅" if in_stock else "❌",
-            "URL":               url,
-        })
+            continue
     return rows
+
+
+def fetch_via_search_api(keyword: str, category: str) -> list:
+    """
+    Fallback: use Nike's search API which is more stable.
+    """
+    params = urllib.parse.urlencode({
+        "queryid":    "filteredProductsWithContext",
+        "country":    "us",
+        "language":   "en",
+        "query":      keyword,
+        "anchor":     "0",
+        "count":      "24",
+        "filter":     "marketplace(US)",
+    })
+    url = f"https://api.nike.com/cic/browse/v2?{params}"
+    req = urllib.request.Request(url, headers={**HEADERS, "Origin":"https://www.nike.com","Referer":"https://www.nike.com/"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+        products = data.get("data", {}).get("products", {}).get("products", [])
+        return parse_page_products(products, category)
+    except Exception:
+        return []
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def load_line_plan() -> pd.DataFrame:
+    """Load Nike product catalog - tries multiple approaches."""
     all_rows = []
-    for label, fid in CATEGORIES.items():
-        raw  = fetch_nike_category(fid, count=24)
-        rows = parse_products(raw, label)
+
+    # Approach: use Nike's search API with category keywords
+    searches = [
+        ("Nike Air Max men",       "Men's Shoes"),
+        ("Nike Air Force women",   "Women's Shoes"),
+        ("Nike running shoes",     "Running Shoes"),
+        ("Jordan retro shoes",     "Jordan Shoes"),
+    ]
+
+    for keyword, category in searches:
+        rows = fetch_via_search_api(keyword, category)
         all_rows.extend(rows)
+
     if not all_rows:
-        return pd.DataFrame()
+        # Hard fallback - return sample data so module still works
+        all_rows = [
+            {"SKU / Product ID":"DH8751-001","Product Name":"Nike Air Force 1 '07","Subtitle":"Men's Shoes","Colorway":"White/White","Gender":"Men","Category":"Men's Shoes","Retail Price ($)":110,"Full Price ($)":110,"Status":"ACTIVE","In Stock":"✅"},
+            {"SKU / Product ID":"DD1503-117","Product Name":"Nike Air Max 270","Subtitle":"Women's Shoes","Colorway":"White/Black","Gender":"Women","Category":"Women's Shoes","Retail Price ($)":150,"Full Price ($)":150,"Status":"ACTIVE","In Stock":"✅"},
+            {"SKU / Product ID":"CU8591-100","Product Name":"Air Jordan 1 Mid","Subtitle":"Men's Shoes","Colorway":"White/Black-Red","Gender":"Men","Category":"Jordan Shoes","Retail Price ($)":125,"Full Price ($)":125,"Status":"ACTIVE","In Stock":"✅"},
+            {"SKU / Product ID":"DC3728-101","Product Name":"Nike Revolution 6","Subtitle":"Running Shoes","Colorway":"White/Black","Gender":"Men","Category":"Running Shoes","Retail Price ($)":65,"Full Price ($)":65,"Status":"ACTIVE","In Stock":"✅"},
+            {"SKU / Product ID":"DH8010-100","Product Name":"Nike Blazer Mid '77","Subtitle":"Women's Shoes","Colorway":"White/Black","Gender":"Women","Category":"Women's Shoes","Retail Price ($)":100,"Full Price ($)":100,"Status":"NEW","In Stock":"✅"},
+        ]
+        st.info("⚠️ Live API unavailable - showing sample Nike catalog data for demo purposes.")
+
     df = pd.DataFrame(all_rows)
     for col in ["Retail Price ($)", "Full Price ($)"]:
-        df[col] = pd.to_numeric(df[col].astype(str).str.replace(",",""), errors="coerce")
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col].astype(str).str.replace(",",""), errors="coerce")
     return df
 
 
@@ -111,16 +168,16 @@ def export_excel(df: pd.DataFrame) -> BytesIO:
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    output   = BytesIO()
-    export_df = df.drop(columns=["URL"], errors="ignore")
+    output    = BytesIO()
+    export_df = df.copy()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         export_df.to_excel(writer, sheet_name="Line Plan", index=False)
         ws = writer.sheets["Line Plan"]
-        hf = PatternFill("solid", fgColor="111827")
-        hfont = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-        bs = Side(style="thin", color="E5E7EB")
-        tb = Border(left=bs, right=bs, top=bs, bottom=bs)
+        hf   = PatternFill("solid", fgColor="111827")
+        hfnt = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        bs   = Side(style="thin", color="E5E7EB")
+        tb   = Border(left=bs, right=bs, top=bs, bottom=bs)
         sfills = {
             "NEW":          PatternFill("solid", fgColor="D1FAE5"),
             "SALE":         PatternFill("solid", fgColor="FEE2E2"),
@@ -129,7 +186,7 @@ def export_excel(df: pd.DataFrame) -> BytesIO:
         }
         for c in range(1, len(export_df.columns)+1):
             cell = ws.cell(row=1, column=c)
-            cell.fill = hf; cell.font = hfont
+            cell.fill = hf; cell.font = hfnt
             cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = tb
         ws.row_dimensions[1].height = 28
@@ -140,18 +197,18 @@ def export_excel(df: pd.DataFrame) -> BytesIO:
                 cell.fill = sf; cell.font = Font(name="Arial", size=9)
                 cell.border = tb; cell.alignment = Alignment(vertical="center")
             ws.row_dimensions[ri].height = 18
-        for i, w in enumerate([18,30,20,20,10,20,14,14,14,10], 1):
+        for i, w in enumerate([18,30,20,20,10,18,14,14,14,10], 1):
             ws.column_dimensions[get_column_letter(i)].width = w
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = f"A1:{get_column_letter(len(export_df.columns))}{len(export_df)+1}"
 
         if "Category" in df.columns and "Retail Price ($)" in df.columns:
-            pp = df.groupby("Category")["Retail Price ($)"].agg(Products="count", Avg="mean", Min="min", Max="max").round(2).reset_index()
+            pp = df.groupby("Category")["Retail Price ($)"].agg(Products="count",Avg="mean",Min="min",Max="max").round(2).reset_index()
             pp.columns = ["Category","# Products","Avg Price ($)","Min Price ($)","Max Price ($)"]
             pp.to_excel(writer, sheet_name="Price Analysis", index=False)
             ws2 = writer.sheets["Price Analysis"]
             for c in range(1,6):
-                ws2.cell(row=1,column=c).fill=hf; ws2.cell(row=1,column=c).font=hfont
+                ws2.cell(row=1,column=c).fill=hf; ws2.cell(row=1,column=c).font=hfnt
                 ws2.column_dimensions[get_column_letter(c)].width=16
 
         if "Status" in df.columns:
@@ -159,18 +216,19 @@ def export_excel(df: pd.DataFrame) -> BytesIO:
             sp.to_excel(writer, sheet_name="Status Summary", index=False)
             ws3 = writer.sheets["Status Summary"]
             for c in range(1,4):
-                ws3.cell(row=1,column=c).fill=hf; ws3.cell(row=1,column=c).font=hfont
+                ws3.cell(row=1,column=c).fill=hf; ws3.cell(row=1,column=c).font=hfnt
                 ws3.column_dimensions[get_column_letter(c)].width=22
 
         if "Retail Price ($)" in df.columns:
             tmp = df.copy()
             tmp["Price Band"] = pd.cut(tmp["Retail Price ($)"],
-                bins=[0,75,100,150,200,999], labels=["Under $75","$75–$100","$100–$150","$150–$200","$200+"])
-            bp = tmp.groupby(["Category","Price Band"], observed=True).size().reset_index(name="SKUs")
+                bins=[0,75,100,150,200,999],
+                labels=["Under $75","$75–$100","$100–$150","$150–$200","$200+"])
+            bp = tmp.groupby(["Category","Price Band"],observed=True).size().reset_index(name="SKUs")
             bp.to_excel(writer, sheet_name="Price Band", index=False)
             ws4 = writer.sheets["Price Band"]
             for c in range(1,4):
-                ws4.cell(row=1,column=c).fill=hf; ws4.cell(row=1,column=c).font=hfont
+                ws4.cell(row=1,column=c).fill=hf; ws4.cell(row=1,column=c).font=hfnt
                 ws4.column_dimensions[get_column_letter(c)].width=22
 
     output.seek(0)
@@ -179,20 +237,19 @@ def export_excel(df: pd.DataFrame) -> BytesIO:
 
 def show():
     st.markdown("## 📋 Merchandising Line Plan")
-    st.markdown("Live Nike product catalog via Nike's public API - no API key required. "
-                "SKU-level pricing, assortment analysis, and Excel export.")
+    st.markdown("Nike product catalog - SKU-level pricing, assortment analysis, and Excel export.")
 
-    with st.spinner("Fetching live Nike product data..."):
+    with st.spinner("Fetching Nike product catalog..."):
         df = load_line_plan()
 
     if df.empty:
-        st.error("Could not fetch Nike product data. Try again in a moment.")
+        st.error("Could not load product data.")
         return
 
     c1,c2,c3,c4,c5 = st.columns(5)
     c1.metric("Total SKUs",       len(df))
-    c2.metric("Avg Retail Price", f"${df['Retail Price ($)'].mean():.0f}")
-    c3.metric("🆕 New Launches",  int((df["Status"]=="NEW").sum()))
+    c2.metric("Avg Retail Price", f"${df['Retail Price ($)'].mean():.0f}" if df["Retail Price ($)"].notna().any() else "N/A")
+    c3.metric("🆕 New",           int((df["Status"]=="NEW").sum()))
     c4.metric("🔖 On Sale",       int((df["Status"]=="SALE").sum()))
     c5.metric("❌ Out of Stock",  int((df["Status"]=="OUT OF STOCK").sum()))
 
@@ -202,9 +259,10 @@ def show():
     sel_cat    = st.sidebar.selectbox("Category", ["All"]+sorted(df["Category"].dropna().unique().tolist()))
     sel_gender = st.sidebar.selectbox("Gender",   ["All"]+sorted(df["Gender"].dropna().unique().tolist()))
     sel_status = st.sidebar.selectbox("Status",   ["All"]+sorted(df["Status"].dropna().unique().tolist()))
+
     pmin = float(df["Retail Price ($)"].min() or 0)
     pmax = float(df["Retail Price ($)"].max() or 500)
-    price_range = st.sidebar.slider("Price Range ($)", pmin, pmax, (pmin, pmax)) if pmin < pmax else (pmin, pmax)
+    price_range = st.sidebar.slider("Price Range ($)", pmin, pmax, (pmin, pmax)) if pmin < pmax else (pmin,pmax)
 
     filtered = df.copy()
     if sel_cat    != "All": filtered = filtered[filtered["Category"]==sel_cat]
@@ -215,10 +273,7 @@ def show():
     st.markdown(f"### 🗂️ Line Plan - {len(filtered)} SKUs")
     st.caption("🟢 New · 🔴 Sale · ⬜ Active · ⚫ Out of Stock")
 
-    display_cols = [c for c in ["SKU / Product ID","Product Name","Subtitle",
-        "Colorway","Gender","Category","Retail Price ($)","Full Price ($)","Status","In Stock"]
-        if c in filtered.columns]
-
+    display_cols = [c for c in ["SKU / Product ID","Product Name","Subtitle","Colorway","Gender","Category","Retail Price ($)","Full Price ($)","Status","In Stock"] if c in filtered.columns]
     st.dataframe(filtered[display_cols], column_config={
         "SKU / Product ID":  st.column_config.TextColumn("SKU", width="medium"),
         "Product Name":      st.column_config.TextColumn("Product Name", width="large"),
@@ -249,8 +304,7 @@ def show():
         sc.columns = ["Status","Count"]
         fig2 = px.pie(sc, names="Status", values="Count", hole=0.4,
                       color="Status",
-                      color_discrete_map={"NEW":"#1D9E75","ACTIVE":"#60a5fa",
-                                          "SALE":"#E24B4A","OUT OF STOCK":"#94a3b8"})
+                      color_discrete_map={"NEW":"#1D9E75","ACTIVE":"#60a5fa","SALE":"#E24B4A","OUT OF STOCK":"#94a3b8"})
         fig2.update_layout(height=280, margin=dict(l=0,r=0,t=10,b=0), paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -282,5 +336,4 @@ def show():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
     with col2:
-        st.info("**Excel sheets:** Line Plan (full SKU list, color-coded) · "
-                "Price Analysis · Status Summary · Price Band breakdown")
+        st.info("**Excel sheets:** Line Plan · Price Analysis · Status Summary · Price Band")
