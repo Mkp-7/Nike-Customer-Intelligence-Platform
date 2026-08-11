@@ -12,7 +12,7 @@ MOD_DIR  = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, MOD_DIR)
 
-from config import REVIEWS_CSV, PRIMARY_BRAND_ID, PRODUCT_CATEGORIES, GROQ_MODEL
+from config import REVIEWS_CSV, PRIMARY_BRAND_ID, PRODUCT_CATEGORIES
 from voc_analyzer import get_groq_client, cluster_themes, detect_anomalies, write_exec_summary
 
 
@@ -66,8 +66,10 @@ def show():
         has_state = df["state"].fillna("").str.strip() != ""
         df = df[(~has_state) | df["state"].isin(sel_states)]
 
-    if sel_source: df = df[df["source"].isin(sel_source)]
-    if sel_cat:    df = df[df["category"].isin(sel_cat)]
+    if sel_source:
+        df = df[df["source"].isin(sel_source)]
+    if sel_cat:
+        df = df[df["category"].isin(sel_cat)]
     df = df[df["stars"].between(stars_range[0], stars_range[1])]
 
     if df.empty:
@@ -81,10 +83,10 @@ def show():
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Reviews",           f"{total:,}")
-    c2.metric("Avg Rating",        f"{avg:.2f} ⭐")
-    c3.metric("Positive (4-5⭐)",  f"{pos:.1f}%")
-    c4.metric("Negative (1-2⭐)",  f"{neg:.1f}%")
+    c1.metric("Reviews",          f"{total:,}")
+    c2.metric("Avg Rating",       f"{avg:.2f} ⭐")
+    c3.metric("Positive (4-5⭐)", f"{pos:.1f}%")
+    c4.metric("Negative (1-2⭐)", f"{neg:.1f}%")
 
     st.markdown("---")
 
@@ -114,9 +116,94 @@ def show():
 
     # ── Rating trend ──────────────────────────────────────────────────────────
     st.markdown("### 📈 Rating Trend")
-    df_dated = df.dropna(subset=["date"])
+    df_dated = df.dropna(subset=["date"]).copy()
     if not df_dated.empty:
-        df_dated = df_dated.copy()
         df_dated["month"] = df_dated["date"].dt.to_period("M").dt.to_timestamp()
         trend = df_dated.groupby("month")["stars"].mean().reset_index()
-        fig2 = px.line(trend, x="month", y="stars", markers=
+        fig2 = px.line(trend, x="month", y="stars", markers=True,
+                       labels={"month": "Month", "stars": "Avg Rating"})
+        fig2.add_hline(y=avg, line_dash="dot",
+                       annotation_text=f"Overall avg: {avg:.2f}⭐")
+        fig2.update_layout(
+            height=280, yaxis=dict(range=[1, 5.5]),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+        st.plotly_chart(fig2, width="stretch")
+
+    st.markdown("---")
+
+    # ── Locations Needing Attention ───────────────────────────────────────────
+    st.markdown("### 🚨 Locations Needing Attention")
+    anomalies = detect_anomalies(df_all)
+    if anomalies.empty:
+        st.success("✅ No locations significantly below brand average.")
+    else:
+        st.dataframe(
+            anomalies[["business_id", "avg_rating", "total_reviews", "rating_drop"]].head(10),
+            column_config={
+                "business_id":   st.column_config.TextColumn("Location"),
+                "avg_rating":    st.column_config.NumberColumn("Avg Rating", format="%.2f⭐"),
+                "total_reviews": st.column_config.NumberColumn("Reviews"),
+                "rating_drop":   st.column_config.NumberColumn("Below Brand Avg", format="-%.2f"),
+            },
+            hide_index=True, width="stretch",
+        )
+
+    st.markdown("---")
+
+    # ── AI Theme Analysis ─────────────────────────────────────────────────────
+    st.markdown("### 🧠 AI Theme Analysis")
+    col1, col2 = st.columns([1, 3])
+    run_ai  = col1.button("Run AI Analysis", type="primary")
+    max_rev = col2.slider("Reviews to analyze", 50, 300, 150, 50)
+
+    if run_ai:
+        try:
+            client = get_groq_client()
+        except ValueError as e:
+            st.error(str(e))
+            return
+
+        sample = []
+        for s in [1, 2, 3, 4, 5]:
+            bucket = df[df["stars"] == s]["text"].dropna().tolist()
+            sample.extend(bucket[:max_rev // 5])
+        sample = sample[:max_rev]
+
+        with st.spinner("AI clustering themes..."):
+            result = cluster_themes(sample, client, industry="athletic footwear")
+
+        themes = result.get("themes", [])
+        if themes:
+            scol = {"positive": "#22c55e", "negative": "#ef4444", "mixed": "#f59e0b"}
+            for t in themes:
+                c = scol.get(t.get("sentiment", "mixed"), "#888")
+                st.markdown(
+                    f"<div style='border-left:4px solid {c};padding:8px 16px;margin:8px 0'>"
+                    f"<strong>{t['name']}</strong> - {t['percent']}% - <em>{t['sentiment']}</em><br>"
+                    f"{t['description']}<br>"
+                    f"<small>💬 \"{t.get('example_quote','')}\"</small></div>",
+                    unsafe_allow_html=True,
+                )
+
+            d_min = df["date"].min()
+            d_max = df["date"].max()
+            date_range = (
+                f"{d_min.strftime('%b %Y') if pd.notna(d_min) else 'N/A'} – "
+                f"{d_max.strftime('%b %Y') if pd.notna(d_max) else 'N/A'}"
+            )
+            st.markdown("#### Executive Summary")
+            with st.spinner("Generating summary..."):
+                summary = write_exec_summary(
+                    themes, anomalies, total, avg, date_range, client, "Nike"
+                )
+            st.info(summary)
+
+    st.markdown("---")
+    with st.expander("📋 Raw Reviews"):
+        show_cols = [c for c in ["stars","date","category","source","title","text"]
+                     if c in df.columns]
+        disp = df[show_cols].head(200).copy()
+        disp["date"] = disp["date"].astype(str).str[:10]
+        st.dataframe(disp, hide_index=True, width="stretch", height=400)
