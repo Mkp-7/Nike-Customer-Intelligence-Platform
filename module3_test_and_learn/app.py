@@ -1,152 +1,266 @@
 """
-Module 3 - Test & Learn Autopilot
+Module 3 - Consumer Defection Radar
+Detects Nike customers switching to competitors using NLP on review text.
+Maps defection risk to product categories and generates an AI recovery brief.
 """
-
-import os
+import os, sys
 import pandas as pd
-import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
-from scipy import stats
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MOD_DIR  = os.path.join(BASE_DIR, "module1_voice_of_customer")
+sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, MOD_DIR)
+
+from config import (
+    REVIEWS_CSV, BRANDS, PRIMARY_BRAND_ID, GROQ_MODEL,
+    DEFECTION_KEYWORDS, PRODUCT_CATEGORIES,
+)
+from voc_analyzer import get_groq_client
+
+BRAND_MAP = {b["brand_id"]: b["name"]  for b in BRANDS}
+COLOR_MAP = {b["name"]:     b["color"] for b in BRANDS}
+COMPETITORS = [b["name"] for b in BRANDS if b["brand_id"] != PRIMARY_BRAND_ID]
 
 
-def cohens_d(a, b):
-    n1, n2 = len(a), len(b)
-    if n1 < 2 or n2 < 2:
-        return 0.0
-    pooled = np.sqrt(((n1-1)*np.var(a,ddof=1)+(n2-1)*np.var(b,ddof=1))/(n1+n2-2))
-    return (np.mean(a)-np.mean(b))/pooled if pooled else 0.0
+def classify_category(text: str) -> str:
+    text_lower = str(text).lower()
+    for cat, keywords in PRODUCT_CATEGORIES.items():
+        if any(k in text_lower for k in keywords):
+            return cat
+    return "General"
 
 
-def verdict(p, d, pilot_mean, control_mean):
-    sig  = p < 0.05
-    big  = abs(d) >= 0.2
-    pos  = pilot_mean > control_mean
-    if sig and big and pos:
-        return "SCALE IT UP", "#1D9E75", "Statistically significant and practically meaningful improvement. Recommend expanding to the next group of locations immediately."
-    if sig and big and not pos:
-        return "KILL THE PILOT", "#E24B4A", "Pilot is significantly underperforming control locations. Recommend halting and investigating root cause."
-    if sig and not big:
-        return "MONITOR", "#BA7517", "Statistically significant but small effect. Continue collecting data for 2-4 more weeks before deciding."
-    return "TOO EARLY TO CALL", "#5F5E5A", f"Not enough data yet. Current p-value is {p:.3f} (need < 0.05). Keep running."
+def detect_defection_signals(text: str) -> list:
+    text_lower = str(text).lower()
+    return [kw for kw in DEFECTION_KEYWORDS if kw in text_lower]
 
 
-def sample_csv(label):
-    import random
-    random.seed(42 if label=="pilot" else 99)
-    dates = pd.date_range("2024-01-01","2024-06-30",freq="W")
-    rows = []
-    base = 3.8 if label=="pilot" else 3.5
-    for d in dates:
-        for _ in range(random.randint(5,15)):
-            rows.append({"date":d.strftime("%Y-%m-%d"),
-                         "stars":min(5,max(1,round(base+random.gauss(0,0.8))))})
-    return pd.DataFrame(rows).to_csv(index=False)
+def detect_competitor_mentions(text: str) -> list:
+    text_lower = str(text).lower()
+    return [c for c in COMPETITORS if c.lower() in text_lower]
+
+
+@st.cache_data(show_spinner=False)
+def build_defection_df() -> pd.DataFrame:
+    if not os.path.exists(REVIEWS_CSV):
+        return pd.DataFrame()
+
+    df = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
+    df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
+
+    if "brand_id" in df.columns:
+        df = df[df["brand_id"] == PRIMARY_BRAND_ID]
+
+    df = df.dropna(subset=["text", "stars"])
+
+    df["category"]            = df["text"].apply(classify_category)
+    df["defection_signals"]   = df["text"].apply(detect_defection_signals)
+    df["competitor_mentions"] = df["text"].apply(detect_competitor_mentions)
+    df["is_defection"]        = df["defection_signals"].apply(len) > 0
+    df["is_negative"]         = df["stars"] <= 2
+    df["defection_risk"]      = df["is_defection"] & df["is_negative"]
+
+    return df
 
 
 def show():
-    st.markdown("## Test & Learn Autopilot")
+    st.markdown("## 🚨 Consumer Defection Radar")
     st.markdown(
-        "Upload pilot and control location CSVs. "
-        "Get instant statistical significance and a clear verdict: **scale it, kill it, or keep watching.**"
+        "Scans Nike App Store reviews for language patterns indicating consumers "
+        "switching to competitors. Maps defection risk by product category and "
+        "generates an AI-powered recovery brief for leadership."
     )
 
-    with st.expander("Download sample CSVs"):
-        c1, c2 = st.columns(2)
-        c1.download_button("sample_pilot.csv", data=sample_csv("pilot"),
-                            file_name="sample_pilot.csv", mime="text/csv")
-        c2.download_button("sample_control.csv", data=sample_csv("control"),
-                            file_name="sample_control.csv", mime="text/csv")
-        st.caption("CSV must have: `date` (YYYY-MM-DD) and `stars` (1–5) columns.")
-
-    st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Pilot Locations** - running the new initiative")
-        pilot_file = st.file_uploader("Upload pilot CSV", type=["csv"], key="pilot")
-    with c2:
-        st.markdown("**Control Locations** - business as usual")
-        ctrl_file = st.file_uploader("Upload control CSV", type=["csv"], key="control")
-
-    if not pilot_file or not ctrl_file:
-        st.info("Upload both CSVs above to run the analysis.")
+    df = build_defection_df()
+    if df.empty:
+        st.error("No data. Run scraper: GitHub Actions → Scrape Reviews.")
         return
 
-    try:
-        pdf = pd.read_csv(pilot_file, parse_dates=["date"])
-        cdf = pd.read_csv(ctrl_file,  parse_dates=["date"])
-    except Exception as e:
-        st.error(f"Error reading files: {e}")
-        return
+    total         = len(df)
+    n_defection   = int(df["is_defection"].sum())
+    n_risk        = int(df["defection_risk"].sum())
+    defection_pct = n_defection / total * 100 if total else 0
 
-    for df, name in [(pdf,"pilot"),(cdf,"control")]:
-        if "stars" not in df.columns:
-            st.error(f"{name} CSV must have a 'stars' column.")
-            return
-
-    pdf["stars"] = pd.to_numeric(pdf["stars"], errors="coerce")
-    cdf["stars"] = pd.to_numeric(cdf["stars"], errors="coerce")
-    pdf = pdf.dropna(subset=["stars"])
-    cdf = cdf.dropna(subset=["stars"])
-
-    pa, ca = pdf["stars"].values, cdf["stars"].values
-    _, p = stats.ttest_ind(pa, ca, equal_var=False)
-    d      = cohens_d(pa, ca)
-    pm, cm = float(np.mean(pa)), float(np.mean(ca))
-
-    verd, color, detail = verdict(p, d, pm, cm)
+    # ── KPIs ──────────────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Nike Reviews Analyzed", f"{total:,}")
+    c2.metric("Defection Signals",     f"{n_defection:,}")
+    c3.metric("Defection Rate",        f"{defection_pct:.1f}%",
+              delta="High risk" if defection_pct > 5 else "Manageable",
+              delta_color="inverse" if defection_pct > 5 else "normal")
+    c4.metric("High-Risk Reviews",     f"{n_risk:,}",
+              help="Negative (≤2⭐) reviews that also contain switching language")
 
     st.markdown("---")
-    st.markdown(
-        f"""<div style="background:{color}15;border:2px solid {color};border-radius:12px;padding:20px 24px;margin-bottom:20px;">
-            <div style="font-size:26px;font-weight:700;color:{color};margin-bottom:8px;">{verd}</div>
-            <div style="font-size:14px;color:#444;line-height:1.6;">{detail}</div>
-        </div>""", unsafe_allow_html=True)
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("Pilot Avg ⭐",  f"{pm:.2f}", f"{pm-cm:+.2f} vs control")
-    c2.metric("Control Avg ⭐", f"{cm:.2f}")
-    c3.metric("P-Value",        f"{p:.4f}", "significant" if p<0.05 else "not yet")
-    c4.metric("Effect Size (d)", f"{abs(d):.2f}")
-    c5.metric("Sample (P/C)",   f"{len(pa):,} / {len(ca):,}")
+    # ── Defection rate by category ────────────────────────────────────────────
+    st.markdown("### 📦 Defection Risk by Product Category")
+    cat_stats = (df.groupby("category")
+                 .agg(total=("stars", "count"),
+                      defections=("is_defection", "sum"),
+                      avg_rating=("stars", "mean"))
+                 .reset_index())
+    cat_stats["defection_rate"] = (
+        cat_stats["defections"] / cat_stats["total"] * 100
+    ).round(1)
+    cat_stats = cat_stats.sort_values("defection_rate", ascending=False)
 
-    st.markdown("---")
-    st.markdown("### Weekly Trend: Pilot vs Control")
-    pw = pdf.set_index("date")["stars"].resample("W").mean().reset_index()
-    cw = cdf.set_index("date")["stars"].resample("W").mean().reset_index()
-    pw.columns = cw.columns = ["Week","Avg"]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=pw["Week"], y=pw["Avg"], name="Pilot",
-                             line=dict(color="#1D9E75",width=2.5), mode="lines+markers"))
-    fig.add_trace(go.Scatter(x=cw["Week"], y=cw["Avg"], name="Control",
-                             line=dict(color="#E24B4A",width=2.5,dash="dot"), mode="lines+markers"))
-    fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0),
-                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                      yaxis=dict(range=[1,5]), legend=dict(orientation="h",y=1.1))
+    fig = px.bar(
+        cat_stats, x="category", y="defection_rate",
+        color="defection_rate",
+        color_continuous_scale=["#22c55e", "#f59e0b", "#ef4444"],
+        text=cat_stats["defection_rate"].apply(lambda x: f"{x:.1f}%"),
+        labels={"category": "Product Category", "defection_rate": "Defection Rate (%)"},
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        height=320, coloraxis_showscale=False,
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
     st.plotly_chart(fig, width="stretch")
 
-    st.markdown("### Rating Distribution")
-    star_data = pd.DataFrame({
-        "Stars":  [f"{s}⭐" for s in range(1,6)]*2,
-        "Pct":    [(pa==s).mean()*100 for s in range(1,6)] + [(ca==s).mean()*100 for s in range(1,6)],
-        "Group":  ["Pilot"]*5 + ["Control"]*5,
-    })
-    fig2 = px.bar(star_data, x="Stars", y="Pct", color="Group", barmode="group",
-                  color_discrete_map={"Pilot":"#1D9E75","Control":"#E24B4A"},
-                  labels={"Pct":"% of Reviews"})
-    fig2.update_layout(height=260, margin=dict(l=0,r=0,t=10,b=0),
-                       plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig2, width="stretch")
+    st.markdown("---")
 
-    if p >= 0.05:
-        st.markdown("---")
-        st.markdown("### How much more data do you need?")
-        cur_d   = abs(d) if abs(d) > 0.05 else 0.2
-        n_need  = int(np.ceil((2.80**2)*2/(cur_d**2)))
-        n_more  = max(0, n_need - min(len(pa),len(ca)))
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Current sample (smaller)", min(len(pa),len(ca)))
-        c2.metric("Needed for 80% power",     n_need)
-        c3.metric("Additional needed",         n_more)
+    # ── Which competitors are named ───────────────────────────────────────────
+    st.markdown("### 🎯 Which Competitors Are Stealing Nike Customers?")
+    defection_reviews = df[df["is_defection"]]
+
+    if not defection_reviews.empty:
+        all_mentions = []
+        for mentions in defection_reviews["competitor_mentions"]:
+            all_mentions.extend(mentions)
+
+        if all_mentions:
+            mc = (pd.Series(all_mentions)
+                  .value_counts()
+                  .reset_index())
+            mc.columns = ["Competitor", "Mentions"]
+
+            fig2 = px.bar(
+                mc, x="Competitor", y="Mentions",
+                color="Competitor", color_discrete_map=COLOR_MAP,
+                text="Mentions",
+                labels={"Competitor": "Competitor Brand",
+                        "Mentions": "Mentions in Defection Reviews"},
+            )
+            fig2.update_traces(textposition="outside")
+            fig2.update_layout(
+                height=300, showlegend=False,
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=0, r=0, t=10, b=0),
+            )
+            st.plotly_chart(fig2, width="stretch")
+        else:
+            st.info("Defection signals detected but no specific competitors named in reviews.")
+
+    st.markdown("---")
+
+    # ── Defection review samples ──────────────────────────────────────────────
+    st.markdown("### 📋 Defection Review Samples")
+    st.caption("Reviews containing switching language - lowest rated first.")
+
+    if not defection_reviews.empty:
+        show_df = (defection_reviews
+                   .sort_values("stars")[
+                       ["stars", "date", "category",
+                        "defection_signals", "competitor_mentions", "text"]
+                   ]
+                   .head(25)
+                   .copy())
+        show_df["date"]               = show_df["date"].astype(str).str[:10]
+        show_df["defection_signals"]  = show_df["defection_signals"].apply(
+            lambda x: ", ".join(x)
+        )
+        show_df["competitor_mentions"] = show_df["competitor_mentions"].apply(
+            lambda x: ", ".join(x) if x else "-"
+        )
+        show_df["text"] = show_df["text"].str[:300]
+
+        st.dataframe(
+            show_df,
+            column_config={
+                "stars":               st.column_config.NumberColumn("⭐", width="small"),
+                "date":                st.column_config.TextColumn("Date", width="small"),
+                "category":            st.column_config.TextColumn("Category", width="medium"),
+                "defection_signals":   st.column_config.TextColumn("Trigger Phrase", width="large"),
+                "competitor_mentions": st.column_config.TextColumn("Competitor Named", width="medium"),
+                "text":                st.column_config.TextColumn("Review", width="large"),
+            },
+            hide_index=True, width="stretch", height=420,
+        )
+
+    st.markdown("---")
+
+    # ── AI Recovery Brief ─────────────────────────────────────────────────────
+    st.markdown("### 🧠 AI Recovery Brief")
+    st.caption(
+        "Groq LLaMA analyzes defection patterns and writes an executive-ready "
+        "recovery plan aligned with Nike's Return to Sport strategy."
+    )
+
+    if st.button("Generate Recovery Brief", type="primary"):
+        try:
+            client = get_groq_client()
+        except ValueError as e:
+            st.error(str(e))
+            return
+
+        top_cats     = cat_stats.head(3)["category"].tolist()
+        sample_revs  = (defection_reviews
+                        .nsmallest(20, "stars")["text"]
+                        .tolist())
+        review_text  = "\n".join([f"- {r[:250]}" for r in sample_revs])
+
+        prompt = f"""You are a senior consumer insights analyst at Nike.
+Nike's CEO Elliott Hill has tasked you with diagnosing and reversing consumer defection.
+
+DATA SUMMARY:
+- {n_defection} Nike reviews ({defection_pct:.1f}%) contain defection signals
+- Highest-risk product categories: {', '.join(top_cats)}
+- High-risk reviews (negative + switching language): {n_risk}
+
+SAMPLE DEFECTION REVIEWS:
+{review_text}
+
+Write a concise executive recovery brief (4 short paragraphs) for Nike leadership:
+1. Root causes - what product/experience failures are driving defection
+2. Competitive threat - which competitor is benefiting most and why
+3. Immediate actions - top 3 specific fixes Nike must prioritize
+4. Strategic recommendation aligned with Nike's "Return to Sport" mission under Elliott Hill
+
+Plain business English. Specific and data-driven. Under 250 words. No bullet points."""
+
+        with st.spinner("AI analyzing defection patterns..."):
+            resp = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=600,
+            )
+            brief = resp.choices[0].message.content.strip()
+
+        st.markdown("#### Recovery Brief")
+        st.info(brief)
+
+        # ── Return to Sport Score ─────────────────────────────────────────────
+        st.markdown("#### 🏃 Return to Sport Readiness Score")
+        running_df = df[df["category"] == "Running"]
+        if not running_df.empty:
+            run_avg      = running_df["stars"].mean()
+            run_pos      = (running_df["stars"] >= 4).mean()
+            run_def_rate = running_df["is_defection"].mean()
+            rts_score    = round(
+                (run_avg / 5) * 50 + run_pos * 30 + (1 - run_def_rate) * 20, 1
+            )
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Running Avg Rating",    f"{run_avg:.2f}⭐")
+            r2.metric("Running Positive %",    f"{run_pos*100:.0f}%")
+            r3.metric("Running Defection Rate", f"{run_def_rate*100:.1f}%")
+            r4.metric("Return to Sport Score", f"{rts_score}/100",
+                      delta="On track" if rts_score >= 70 else "Needs work",
+                      delta_color="normal" if rts_score >= 70 else "inverse")
+        else:
+            st.info("Not enough running-specific reviews to compute Return to Sport score.")
