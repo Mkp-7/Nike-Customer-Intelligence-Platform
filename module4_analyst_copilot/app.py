@@ -1,32 +1,27 @@
 """
 Module 4 - Analyst Copilot
-Powered by Gemini 1.5 Flash - 1 million token context window.
-Sends ALL reviews + full merchandising catalog in one API call.
-No sampling, no truncation - the AI sees everything.
+Powered by Groq LLaMA 3.3-70B (free, fast).
+Sends a representative sample of reviews + full catalog context.
 """
-
 import os, sys
 import pandas as pd
 import streamlit as st
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
+
 from config import REVIEWS_CSV, APP_NAME, GROQ_MODEL
+from groq import Groq
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
-
-
-def get_gemini_client():
-    if not GEMINI_API_KEY:
+def get_groq_client():
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
         raise ValueError(
-            "GEMINI_API_KEY not set.\n"
-            "Get a free key at https://aistudio.google.com\n"
-            "Add it to Streamlit Secrets: GEMINI_API_KEY = 'your_key'"
+            "GROQ_API_KEY not set.\n"
+            "Get a free key at https://console.groq.com\n"
+            "Add it to Streamlit Secrets: GROQ_API_KEY = 'your_key'"
         )
-    from google import genai
-    return genai.Client(api_key=GEMINI_API_KEY)
-
+    return Groq(api_key=api_key)
 
 def load_reviews() -> pd.DataFrame:
     if not os.path.exists(REVIEWS_CSV):
@@ -35,23 +30,15 @@ def load_reviews() -> pd.DataFrame:
     df["stars"] = pd.to_numeric(df["stars"], errors="coerce")
     return df
 
-
 def load_merch_data() -> pd.DataFrame:
-    """Try to load merchandising data if available."""
     try:
-        sys.path.insert(0, BASE_DIR)
         from module5_merchandising.app import load_line_plan
         return load_line_plan()
     except Exception:
         return pd.DataFrame()
 
-
 @st.cache_data(show_spinner=False)
 def build_full_context() -> str:
-    """
-    Build complete context with ALL reviews + merchandising data.
-    Gemini 1.5 Flash supports 1M tokens - no sampling needed.
-    """
     df = load_reviews()
     if df.empty:
         return ""
@@ -59,67 +46,80 @@ def build_full_context() -> str:
     total = len(df)
     avg   = df["stars"].mean() if df["stars"].notna().any() else 0
 
-    # ── Full review text ──────────────────────────────────────────────────────
     lines = [
-        f"COMPLETE REVIEW DATASET - {APP_NAME}",
-        f"=" * 50,
+        f"CUSTOMER REVIEW DATASET - {APP_NAME}",
+        "=" * 50,
         f"Total reviews: {total:,}",
         f"Average rating: {avg:.2f} / 5.0",
-        f"",
-        f"ALL REVIEWS (complete, unsampled):",
-        f"-" * 40,
+        "",
     ]
 
-    for _, row in df.iterrows():
-        stars   = row.get("stars", "")
-        date    = row.get("date", "")
-        version = row.get("version", "")
-        title   = row.get("title", "")
-        text    = str(row.get("text", "")).strip()
-        source  = row.get("source", "")
-        place   = row.get("place_name", "")
+    # Rating distribution
+    dist = df["stars"].value_counts().sort_index()
+    lines.append("RATING DISTRIBUTION:")
+    for k, v in dist.items():
+        lines.append(f"  {int(k)} star: {int(v)} ({v/total*100:.1f}%)")
+    lines.append("")
 
-        meta = f"[{stars}⭐"
-        if date:    meta += f" | {str(date)[:10]}"
-        if version: meta += f" | v{version}"
-        if place:   meta += f" | {place}"
-        if source:  meta += f" | {source}"
-        meta += "]"
-
-        if title:
-            lines.append(f"{meta} {title}: {text}")
-        else:
-            lines.append(f"{meta} {text}")
-
-    # ── Version summary ───────────────────────────────────────────────────────
+    # Version summary
     if "version" in df.columns and df["version"].notna().any():
-        lines.append(f"\nVERSION PERFORMANCE SUMMARY:")
-        lines.append("-" * 40)
+        lines.append("VERSION PERFORMANCE:")
         va = (df.groupby("version")["stars"]
               .agg(avg="mean", count="count")
               .sort_values("avg")
               .reset_index())
         for _, row in va.iterrows():
-            lines.append(f"v{row['version']}: {row['avg']:.2f}⭐ ({row['count']} reviews)")
+            lines.append(f"  v{row['version']}: {row['avg']:.2f}⭐ ({row['count']} reviews)")
+        lines.append("")
 
-    # ── Location summary ──────────────────────────────────────────────────────
+    # Location summary
     if "place_name" in df.columns and df["place_name"].notna().any():
-        lines.append(f"\nLOCATION PERFORMANCE SUMMARY:")
-        lines.append("-" * 40)
+        lines.append("LOCATION PERFORMANCE:")
         la = (df.groupby("place_name")["stars"]
               .agg(avg="mean", count="count")
               .sort_values("avg")
               .reset_index())
         for _, row in la.iterrows():
-            lines.append(f"{row['place_name']}: {row['avg']:.2f}⭐ ({row['count']} reviews)")
+            lines.append(f"  {row['place_name']}: {row['avg']:.2f}⭐ ({row['count']} reviews)")
+        lines.append("")
 
-    # ── Merchandising data ────────────────────────────────────────────────────
+    # Sample reviews - stratified by star rating so all sentiments are covered
+    lines.append("SAMPLE REVIEWS (stratified by rating):")
+    lines.append("-" * 40)
+    sample_frames = []
+    for stars in [1, 2, 3, 4, 5]:
+        bucket = df[df["stars"] == stars].dropna(subset=["text"])
+        n = min(30, len(bucket))
+        if n:
+            sample_frames.append(bucket.sample(n, random_state=42))
+    sample = pd.concat(sample_frames).sample(frac=1, random_state=42) if sample_frames else df.head(100)
+
+    for _, row in sample.iterrows():
+        stars   = row.get("stars", "")
+        date    = str(row.get("date", ""))[:10]
+        version = row.get("version", "")
+        title   = row.get("title", "")
+        text    = str(row.get("text", "")).strip()[:300]
+        place   = row.get("place_name", "")
+        meta = f"[{stars}⭐"
+        if date:    meta += f" | {date}"
+        if version: meta += f" | v{version}"
+        if place:   meta += f" | {place}"
+        meta += "]"
+        lines.append(f"{meta} {title + ': ' if title else ''}{text}")
+
+    # Merchandising data
     merch = load_merch_data()
     if not merch.empty:
-        lines.append(f"\nNIKE PRODUCT CATALOG (LIVE):")
+        lines.append("\nNIKE PRODUCT CATALOG:")
         lines.append("-" * 40)
         lines.append(f"Total SKUs: {len(merch)}")
-        lines.append(f"Avg Retail Price: ${merch['Retail Price ($)'].mean():.2f}")
+        price_col = "Retail Price ($)"
+        if price_col in merch.columns and merch[price_col].notna().any():
+            lines.append(f"Avg Retail Price: ${merch[price_col].mean():.2f}")
+            most_common = merch[price_col].mode()
+            if not most_common.empty:
+                lines.append(f"Most Common Price: ${most_common.iloc[0]:.2f}")
         lines.append(f"New Launches: {(merch['Status']=='NEW').sum()}")
         lines.append(f"On Sale: {(merch['Status']=='SALE').sum()}")
         lines.append("")
@@ -130,7 +130,7 @@ def build_full_context() -> str:
                 f"{row.get('Product Name','')} | "
                 f"{row.get('Colorway','')} | "
                 f"{row.get('Category','')} | "
-                f"${row.get('Retail Price ($)','')} | "
+                f"${row.get(price_col,'')} | "
                 f"{row.get('Status','')} | "
                 f"{row.get('Gender','')}"
             )
@@ -138,73 +138,33 @@ def build_full_context() -> str:
     return "\n".join(lines)
 
 
-def ask_gemini(question: str, context: str, history: list) -> str:
-    """Send question to Gemini with full context."""
-    client = get_gemini_client()
-
-    system = f"""You are an expert retail data analyst for {APP_NAME}.
-You have access to the COMPLETE customer review dataset and live product catalog below.
-Unlike typical AI assistants, you have access to ALL reviews - not just samples.
-
-Use specific data from the reviews to answer questions accurately.
-Be direct, specific, and use numbers. Under 200 words unless asked for detail.
-
-{context}"""
-
-    # Build conversation history
-    messages = []
-    for msg in history[-10:]:  # last 10 turns
-        messages.append(msg["content"])
-
-    full_prompt = system + "\n\nConversation so far:\n"
-    for msg in history[-6:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        full_prompt += f"\n{role}: {msg['content']}"
-    full_prompt += f"\n\nUser: {question}\n\nAssistant:"
-
-    from google.genai import types
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=full_prompt,
-        config=types.GenerateContentConfig(
-            max_output_tokens=500,
-            temperature=0.3,
-        )
-    )
-    return response.text.strip()
-
-
 def show():
     st.markdown("## 🤖 Analyst Copilot")
     st.markdown(
         f"Ask anything about **{APP_NAME}** reviews and product catalog. "
-        f"Powered by **Gemini 1.5 Flash** - sees **all reviews**, not just samples."
+        f"Powered by **Groq LLaMA 3.3-70B** (free, fast)."
     )
 
-    # ── Load data ─────────────────────────────────────────────────────────────
     df = load_reviews()
     if df.empty:
         st.error("No review data found. Run the scraper workflow first.")
         return
 
     try:
-        client = get_gemini_client()
+        client = get_groq_client()
     except ValueError as e:
         st.error(str(e))
         return
 
-    # ── Build context ─────────────────────────────────────────────────────────
-    with st.spinner("Loading complete dataset into AI context..."):
+    with st.spinner("Loading dataset into AI context..."):
         context = build_full_context()
 
-    total_chars = len(context)
-    approx_tokens = total_chars // 4
+    approx_tokens = len(context) // 4
     st.success(
-        f"✅ AI has full access to **{len(df):,} reviews** "
-        f"(~{approx_tokens:,} tokens - well within Gemini's 1M limit)"
+        f"✅ AI has access to **{len(df):,} reviews** "
+        f"(~{approx_tokens:,} tokens)"
     )
 
-    # ── Suggested questions ───────────────────────────────────────────────────
     st.markdown("### 💡 Try asking:")
     questions = [
         "What are the top 5 complaints across all reviews?",
@@ -218,7 +178,6 @@ def show():
         "What is the most common price point in the catalog?",
         "Compare negative reviews from different locations.",
     ]
-
     cols = st.columns(4)
     for i, q in enumerate(questions):
         if cols[i % 4].button(q, key=f"q{i}"):
@@ -226,7 +185,6 @@ def show():
 
     st.markdown("---")
 
-    # ── Chat history ──────────────────────────────────────────────────────────
     if "history" not in st.session_state:
         st.session_state["history"] = []
 
@@ -243,13 +201,26 @@ def show():
             st.markdown(question)
         st.session_state["history"].append({"role": "user", "content": question})
 
+        system = f"""You are an expert retail data analyst for {APP_NAME}.
+You have access to the customer review dataset and product catalog below.
+Be direct, specific, and use numbers. Under 200 words unless asked for detail.
+
+{context}"""
+
+        msgs = [{"role": "system", "content": system}]
+        msgs += [{"role": m["role"], "content": m["content"]}
+                 for m in st.session_state["history"][-6:]]
+
         with st.chat_message("assistant"):
-            with st.spinner("Gemini analyzing all reviews..."):
+            with st.spinner("Analyzing..."):
                 try:
-                    answer = ask_gemini(
-                        question, context,
-                        st.session_state["history"]
+                    resp = client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=msgs,
+                        temperature=0.3,
+                        max_tokens=500,
                     )
+                    answer = resp.choices[0].message.content.strip()
                 except Exception as e:
                     answer = f"Error: {e}"
                 st.markdown(answer)
@@ -261,6 +232,5 @@ def show():
             st.session_state["history"] = []
             st.rerun()
 
-    # ── Data context preview ──────────────────────────────────────────────────
-    with st.expander(f"🔍 View full context sent to Gemini (~{approx_tokens:,} tokens)"):
-        st.text(context[:5000] + "\n\n... [truncated for display - full context sent to AI]")
+    with st.expander(f"🔍 View context sent to AI (~{approx_tokens:,} tokens)"):
+        st.text(context[:5000] + "\n\n... [truncated for display]")
