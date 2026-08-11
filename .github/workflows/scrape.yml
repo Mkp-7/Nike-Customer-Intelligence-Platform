@@ -1,41 +1,33 @@
 name: Scrape Reviews
-
 on:
-  push:
-    paths:
-      - 'config.py'
-  schedule:
-    - cron: '0 6 * * 1'
   workflow_dispatch:
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Run scraper
+      - name: Install Playwright browser
+        run: playwright install chromium
+      - name: Scrape reviews (Nike + competitors)
         env:
-          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GOOGLE_PLACES_API_KEY: ${{ secrets.GOOGLE_PLACES_API_KEY }}
         run: python module1_voice_of_customer/01_extract_reviews.py
-
-      - name: Commit data back to repo
+      - name: Scrape Nike catalog
+        run: python scrape_nike_catalog.py
+      - name: Commit data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/reviews.csv
-          git diff --staged --quiet || git commit -m "Auto-update reviews data [skip ci]"
+          git add -f data/reviews.csv       || true
+          git add -f data/businesses.csv    || true
+          git add -f data/nike_catalog.csv  || true
+          git diff --staged --quiet || git commit -m "Auto-update data [$(date -u '+%Y-%m-%d %H:%M UTC')] [skip ci]"
           git push
