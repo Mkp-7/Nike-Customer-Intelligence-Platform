@@ -1,364 +1,227 @@
 """
-Module 2 - Store Pulse Map
+Module 2 - Competitive Intelligence
+Nike vs On Running vs HOKA vs New Balance
+Side-by-side brand health benchmarking on real App Store data.
 """
-
-import os
-import sys
-import numpy as np
+import os, sys
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MOD_DIR  = os.path.join(BASE_DIR, "module1_voice_of_customer")
 sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, MOD_DIR)
 
-from config import REVIEWS_CSV, BUSINESSES_CSV, PEER_GROUP_COLUMN, SIGNIFICANT_DELTA_STARS
+from config import REVIEWS_CSV, BRANDS, PRIMARY_BRAND_ID, GROQ_MODEL
+from voc_analyzer import get_groq_client
 
-
-def add_jitter(series: pd.Series, amount: float = 0.018) -> pd.Series:
-    np.random.seed(42)
-    return series + np.random.uniform(-amount, amount, size=len(series))
+BRAND_MAP = {b["brand_id"]: b["name"]  for b in BRANDS}
+COLOR_MAP = {b["name"]:     b["color"] for b in BRANDS}
 
 
 @st.cache_data(show_spinner=False)
-def load_and_process(brand_ids_key: str):
-    """brand_ids_key is comma-joined sorted brand_ids for cache invalidation."""
-    brand_ids = [b for b in brand_ids_key.split(",") if b]
+def load_comp_data() -> pd.DataFrame:
+    if not os.path.exists(REVIEWS_CSV):
+        return pd.DataFrame()
+    df = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
+    df["stars"]      = pd.to_numeric(df["stars"], errors="coerce")
+    df["brand_name"] = df["brand_id"].map(BRAND_MAP)
+    return df.dropna(subset=["stars", "brand_name"])
 
-    if not os.path.exists(BUSINESSES_CSV):
-        return None, None
 
-    biz = pd.read_csv(BUSINESSES_CSV)
-    if brand_ids and "brand_id" in biz.columns:
-        biz = biz[biz["brand_id"].isin(brand_ids)]
+def brand_health_score(df: pd.DataFrame, brand_id: str) -> dict:
+    bdf = df[df["brand_id"] == brand_id]
+    if bdf.empty:
+        return {"score": 0, "grade": "N/A", "components": {}}
 
-    if biz.empty:
-        return None, None
+    avg = bdf["stars"].mean()
+    pos = (bdf["stars"] >= 4).mean()
+    neg = (bdf["stars"] <= 2).mean()
 
-    reviews = None
-    if os.path.exists(REVIEWS_CSV):
-        reviews = pd.read_csv(REVIEWS_CSV, parse_dates=["date"])
-        reviews["stars"] = pd.to_numeric(reviews["stars"], errors="coerce")
-        if brand_ids and "brand_id" in reviews.columns:
-            reviews = reviews[reviews["brand_id"].isin(brand_ids)]
-
-        # New schema: place_name in reviews matches name in businesses
-        # Old schema: business_id direct join
-        if "business_id" in reviews.columns:
-            agg = (reviews.groupby("business_id")["stars"]
-                   .agg(avg_rating="mean", review_count="count")
-                   .reset_index())
-            if "review_count" in biz.columns:
-                biz = biz.drop(columns=["review_count"])
-            biz = biz.merge(agg, on="business_id", how="left")
-        else:
-            agg = (reviews.groupby("place_name")["stars"]
-                   .agg(avg_rating="mean", review_count="count")
-                   .reset_index()
-                   .rename(columns={"place_name": "name"}))
-            if "review_count" in biz.columns:
-                biz = biz.drop(columns=["review_count"])
-            biz = biz.merge(agg, on="name", how="left")
-
-        biz["avg_rating"]   = biz["avg_rating"].fillna(biz["stars"])
-        biz["review_count"] = biz["review_count"].fillna(0).astype(int)
+    if "date" in bdf.columns and bdf["date"].notna().any():
+        cutoff     = pd.Timestamp.now() - pd.DateOffset(months=12)
+        recent_pct = (bdf["date"] >= cutoff).mean()
     else:
-        biz["avg_rating"]   = biz["stars"]
-        biz["review_count"] = 0
+        recent_pct = 0.5
 
-    biz = biz.dropna(subset=["latitude", "longitude"])
-    biz["avg_rating"] = pd.to_numeric(biz["avg_rating"], errors="coerce")
-    biz = biz.dropna(subset=["avg_rating"])
+    score = (avg / 5.0) * 40 + pos * 30 + (1 - neg) * 20 + recent_pct * 10
+    grade = "A" if score >= 80 else "B" if score >= 65 else "C" if score >= 50 else "D"
 
-    if biz.empty:
-        return None, None
+    return {
+        "score": round(score, 1),
+        "grade": grade,
+        "components": {
+            "avg_rating":    round(avg, 2),
+            "positive_pct":  round(pos * 100, 1),
+            "negative_pct":  round(neg * 100, 1),
+            "recent_pct":    round(recent_pct * 100, 1),
+        },
+    }
 
-    peer_col = PEER_GROUP_COLUMN if PEER_GROUP_COLUMN in biz.columns else "state"
-    biz["peer_avg"] = biz.groupby(peer_col)["avg_rating"].transform("mean")
-    biz["vs_peer"]  = (biz["avg_rating"] - biz["peer_avg"]).round(2)
 
-    delta = SIGNIFICANT_DELTA_STARS
+def get_ai_themes(brand_id: str, sample_text: str, client) -> str:
+    try:
+        prompt = f"""Analyze these customer reviews for {BRAND_MAP.get(brand_id, brand_id)}.
+Give exactly 3 top themes in this format:
+1. [THEME NAME]: one sentence description (sentiment: positive/negative/mixed)
+2. ...
+3. ...
 
-    def status(d):
-        if d >= delta:  return "Above Peer"
-        if d <= -delta: return "Below Peer"
-        return "On Par"
-
-    biz["status"]      = biz["vs_peer"].apply(status)
-    biz["lat_display"] = add_jitter(biz["latitude"])
-    biz["lon_display"] = add_jitter(biz["longitude"])
-
-    biz["city"]    = biz.get("city",    pd.Series("", index=biz.index)).fillna("")
-    biz["state"]   = biz.get("state",   pd.Series("", index=biz.index)).fillna("")
-    biz["address"] = biz.get("address", pd.Series("", index=biz.index)).fillna("")
-
-    biz["label"] = (biz["name"].astype(str)
-                    + "<br>" + biz["address"]
-                    + "<br>" + biz["city"] + ", " + biz["state"])
-
-    biz["short_label"] = (biz["city"] + ", " + biz["state"]
-                          + "  " + biz["avg_rating"].round(1).astype(str) + "⭐")
-
-    return biz, reviews
+Reviews:
+{sample_text[:3000]}"""
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"AI unavailable: {e}"
 
 
 def show():
-    brand_ids   = st.session_state.get("selected_brand_ids", [])
-    brand_names = st.session_state.get("selected_brand_names", ["All Brands"])
-    brand_label = ", ".join(brand_names) if brand_names else "All Brands"
-    cache_key   = ",".join(sorted(brand_ids))
-
-    st.markdown(f"## 🗺️ Store Pulse Map - {brand_label}")
+    st.markdown("## ⚔️ Competitive Intelligence")
     st.markdown(
-        "Every location benchmarked against its **state peer group**. "
-        "🔴 Below peer · 🟡 On par · 🟢 Above peer"
+        "Nike benchmarked against On Running, HOKA, and New Balance "
+        "using real App Store review data."
     )
 
-    biz, reviews = load_and_process(cache_key)
-
-    if biz is None or len(biz) == 0:
-        st.warning("No location data for the selected brand(s). "
-                   "Zipcar has app-only reviews with no store locations.")
+    df = load_comp_data()
+    if df.empty:
+        st.error("No data. Run scraper: GitHub Actions → Scrape Reviews.")
         return
 
-    # ── Sidebar filters ───────────────────────────────────────────────────────
-    st.sidebar.markdown("### 🗺️ Map Filters")
-    states     = sorted(biz["state"].dropna().unique())
-    sel_states = st.sidebar.multiselect("States", options=states, default=states)
+    brands_in_data = [b for b in df["brand_id"].unique() if b in BRAND_MAP]
 
-    sel_status = st.sidebar.multiselect(
-        "Status",
-        options=["Above Peer", "On Par", "Below Peer"],
-        default=["Above Peer", "On Par", "Below Peer"],
-    )
-    min_rev   = st.sidebar.slider("Min reviews per location", 1, 30, 1)
-    view_mode = st.sidebar.radio(
-        "Map view",
-        options=["📍 Individual pins (jittered)", "🔵 Cluster mode"],
-        index=0,
+    # ── Brand Health Scorecards ───────────────────────────────────────────────
+    st.markdown("### 🏆 Brand Health Scorecards")
+    st.caption(
+        "Composite score (0–100): avg rating (40%) + % positive (30%) "
+        "+ % non-negative (20%) + review recency (10%)"
     )
 
-    # ── Filter ────────────────────────────────────────────────────────────────
-    mask = biz["status"].isin(sel_status) & (biz["review_count"] >= min_rev)
-    if sel_states:
-        mask &= biz["state"].isin(sel_states)
-    filtered = biz[mask].copy()
+    cols = st.columns(len(brands_in_data))
+    grade_icon = {"A": "🟢", "B": "🟡", "C": "🟠", "D": "🔴", "N/A": "⚫"}
 
-    if filtered.empty:
-        st.warning("No locations match the current filters.")
-        return
+    for i, bid in enumerate(brands_in_data):
+        h     = brand_health_score(df, bid)
+        bname = BRAND_MAP[bid]
+        icon  = "👟 " if bid == PRIMARY_BRAND_ID else ""
+        gi    = grade_icon.get(h["grade"], "⚫")
+        comp  = h["components"]
 
-    # ── KPIs ──────────────────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Locations",     len(filtered))
-    c2.metric("Avg Rating",    f"{filtered['avg_rating'].mean():.2f} ⭐")
-    c3.metric("Total Reviews", f"{int(filtered['review_count'].sum()):,}")
-    c4.metric("States",        filtered["state"].nunique())
-    c5.metric("🔴 Below Peer", int((filtered["status"] == "Below Peer").sum()))
-    c6.metric("🟢 Above Peer", int((filtered["status"] == "Above Peer").sum()))
-
-    st.markdown("---")
-
-    # Color: if multiple brands, color by brand_id; otherwise by status
-    multi_brand = "brand_id" in filtered.columns and filtered["brand_id"].nunique() > 1
-
-    if multi_brand:
-        brand_color_map = {
-            bid: col for bid, col in zip(
-                filtered["brand_id"].unique(),
-                ["#3b82f6", "#10b981", "#f59e0b"]
+        with cols[i]:
+            st.markdown(f"**{icon}{bname}**")
+            st.metric("Health Score", f"{h['score']}/100")
+            st.caption(
+                f"{gi} Grade **{h['grade']}**  \n"
+                f"⭐ Avg: {comp.get('avg_rating','-')}  \n"
+                f"👍 Positive: {comp.get('positive_pct','-')}%  \n"
+                f"👎 Negative: {comp.get('negative_pct','-')}%  \n"
+                f"🕐 Recent: {comp.get('recent_pct','-')}%"
             )
-        }
 
-    status_color_map = {"Above Peer": "#1D9E75", "On Par": "#F59E0B", "Below Peer": "#E24B4A"}
-
-    # ── Map ───────────────────────────────────────────────────────────────────
-    fig = go.Figure()
-
-    if "Cluster" in view_mode:
-        group_col  = "brand_id" if multi_brand else "status"
-        color_map  = brand_color_map if multi_brand else status_color_map
-        name_col   = "brand_name" if multi_brand else "status"
-
-        for group_val, color in color_map.items():
-            sub = filtered[filtered[group_col] == group_val]
-            if sub.empty: continue
-            fig.add_trace(go.Scattermapbox(
-                lat=sub["lat_display"], lon=sub["lon_display"],
-                mode="markers",
-                marker=go.scattermapbox.Marker(size=14, color=color, opacity=0.85),
-                cluster=dict(enabled=True, color=color, size=20, step=3),
-                text=sub["label"],
-                customdata=np.stack([
-                    sub["avg_rating"].round(2), sub["peer_avg"].round(2),
-                    sub["vs_peer"], sub["review_count"],
-                    sub["city"], sub["state"],
-                    sub.get("brand_name", pd.Series(group_val, index=sub.index)).fillna(""),
-                ], axis=-1),
-                hovertemplate=(
-                    "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
-                    "Brand: %{customdata[6]}<br>"
-                    "Rating: %{customdata[0]}⭐  State avg: %{customdata[1]}⭐<br>"
-                    "vs Peers: %{customdata[2]:+.2f}⭐  Reviews: %{customdata[3]}<extra></extra>"
-                ),
-                name=sub[name_col].iloc[0] if name_col in sub.columns else group_val,
-            ))
-        fig.update_layout(mapbox_style="carto-positron", mapbox_zoom=3.5,
-                          mapbox_center={"lat": 37.5, "lon": -96}, height=560,
-                          margin=dict(l=0, r=0, t=0, b=0),
-                          legend=dict(title="Brand" if multi_brand else "vs State Peers",
-                                      bgcolor="rgba(255,255,255,0.9)"))
-    else:
-        max_rc = filtered["review_count"].max() or 1
-        filtered["marker_size"] = np.clip(8 + (filtered["review_count"] / max_rc) * 14, 8, 22)
-
-        group_col = "brand_id" if multi_brand else "status"
-        color_map = brand_color_map if multi_brand else status_color_map
-        name_col  = "brand_name" if multi_brand else "status"
-
-        for group_val, color in color_map.items():
-            sub = filtered[filtered[group_col] == group_val]
-            if sub.empty: continue
-            fig.add_trace(go.Scattermapbox(
-                lat=sub["lat_display"], lon=sub["lon_display"],
-                mode="markers+text",
-                marker=go.scattermapbox.Marker(size=sub["marker_size"], color=color, opacity=0.88),
-                text=sub["avg_rating"].round(1).astype(str) + "⭐",
-                textposition="top right",
-                textfont=dict(size=9, color="#333"),
-                customdata=np.stack([
-                    sub["avg_rating"].round(2), sub["peer_avg"].round(2),
-                    sub["vs_peer"], sub["review_count"],
-                    sub["city"], sub["state"], sub["address"],
-                    sub.get("brand_name", pd.Series(group_val, index=sub.index)).fillna(""),
-                ], axis=-1),
-                hovertemplate=(
-                    "<b>%{customdata[4]}, %{customdata[5]}</b><br>"
-                    "%{customdata[6]}<br>"
-                    "Brand: %{customdata[7]}<br>"
-                    "──────────────<br>"
-                    "⭐ Rating: <b>%{customdata[0]}</b>  📊 State avg: %{customdata[1]}<br>"
-                    "📈 vs Peers: <b>%{customdata[2]:+.2f}</b>  💬 Reviews: %{customdata[3]}"
-                    "<extra></extra>"
-                ),
-                name=sub[name_col].iloc[0] if name_col in sub.columns else group_val,
-            ))
-        fig.update_layout(mapbox_style="carto-positron", mapbox_zoom=3.8,
-                          mapbox_center={"lat": 37.5, "lon": -96}, height=560,
-                          margin=dict(l=0, r=0, t=0, b=0),
-                          legend=dict(title="Brand" if multi_brand else "vs State Peers",
-                                      bgcolor="rgba(255,255,255,0.9)"))
-
-    st.plotly_chart(fig, width="stretch", config={
-        "scrollZoom": True, "displayModeBar": True,
-        "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-        "toImageButtonOptions": {"format": "png", "filename": "store_pulse_map"},
-    })
-    st.caption("💡 Hover pins for full details. Pins colored by brand when multiple selected, "
-               "by peer status when one brand selected.")
-
-    # ── Attention tables ──────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 🔴 Locations Needing Most Attention")
-    st.caption("Furthest below state peer average - priority Field Leader calls.")
 
-    disp_cols = [c for c in ["short_label", "brand_name", "state", "avg_rating",
-                              "peer_avg", "vs_peer", "review_count"]
-                 if c in filtered.columns]
-    bottom = (filtered[filtered["status"] == "Below Peer"]
-              .sort_values("vs_peer")[disp_cols].head(15).copy())
+    # ── Rating distribution ───────────────────────────────────────────────────
+    st.markdown("### 📊 Rating Distribution by Brand")
+    dist = (df.groupby(["brand_name", "stars"])
+            .size()
+            .reset_index(name="count"))
+    dist["pct"] = dist.groupby("brand_name")["count"].transform(
+        lambda x: x / x.sum() * 100
+    )
+    fig = px.bar(
+        dist, x="stars", y="pct", color="brand_name", barmode="group",
+        color_discrete_map=COLOR_MAP,
+        labels={"stars": "Stars", "pct": "% of Reviews", "brand_name": "Brand"},
+        text=dist["pct"].apply(lambda x: f"{x:.0f}%"),
+    )
+    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        height=350, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig, width="stretch")
 
-    if bottom.empty:
-        st.success("✅ No locations significantly below their state peer group.")
-    else:
-        for col in ["avg_rating", "peer_avg", "vs_peer"]:
-            if col in bottom.columns: bottom[col] = bottom[col].round(2)
-        st.dataframe(bottom, column_config={
-            "short_label":  st.column_config.TextColumn("Location"),
-            "brand_name":   st.column_config.TextColumn("Brand"),
-            "avg_rating":   st.column_config.NumberColumn("Rating ⭐", format="%.2f"),
-            "peer_avg":     st.column_config.NumberColumn("State Avg ⭐", format="%.2f"),
-            "vs_peer":      st.column_config.ProgressColumn("Gap vs Peers", min_value=-2, max_value=0, format="%.2f ⭐"),
-            "review_count": st.column_config.NumberColumn("Reviews"),
-        }, width="stretch", hide_index=True)
-
-    st.markdown("### 🟢 Top Performing Locations")
-    top = (filtered[filtered["status"] == "Above Peer"]
-           .sort_values("vs_peer", ascending=False)[disp_cols].head(15).copy())
-
-    if top.empty:
-        st.info("No locations significantly above peer group with current filters.")
-    else:
-        for col in ["avg_rating", "peer_avg", "vs_peer"]:
-            if col in top.columns: top[col] = top[col].round(2)
-        st.dataframe(top, column_config={
-            "short_label":  st.column_config.TextColumn("Location"),
-            "brand_name":   st.column_config.TextColumn("Brand"),
-            "avg_rating":   st.column_config.NumberColumn("Rating ⭐", format="%.2f"),
-            "peer_avg":     st.column_config.NumberColumn("State Avg ⭐", format="%.2f"),
-            "vs_peer":      st.column_config.ProgressColumn("Gap vs Peers", min_value=0, max_value=2, format="+%.2f ⭐"),
-            "review_count": st.column_config.NumberColumn("Reviews"),
-        }, width="stretch", hide_index=True)
-
-    # ── State bar chart ───────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 📊 Average Rating by State")
-
-    if multi_brand:
-        sa = (filtered.groupby(["state", "brand_name"])
-              .agg(avg_rating=("avg_rating", "mean"), locations=("name", "count"))
-              .reset_index())
-        sa["avg_rating"] = sa["avg_rating"].round(2)
-        fig2 = px.bar(sa, x="state", y="avg_rating", color="brand_name", barmode="group",
-                      text="avg_rating",
-                      color_discrete_sequence=["#3b82f6", "#10b981", "#f59e0b"],
-                      labels={"state": "State", "avg_rating": "Avg Rating", "brand_name": "Brand"})
-    else:
-        sa = (filtered.groupby("state")
-              .agg(avg_rating=("avg_rating", "mean"), locations=("name", "count"))
-              .sort_values("avg_rating", ascending=False).reset_index())
-        sa["avg_rating"] = sa["avg_rating"].round(2)
-        chain_avg = filtered["avg_rating"].mean()
-        fig2 = px.bar(sa, x="state", y="avg_rating", color="avg_rating",
-                      color_continuous_scale=["#E24B4A", "#F59E0B", "#1D9E75"],
-                      range_color=[2.0, 4.5], text="avg_rating",
-                      hover_data={"locations": True},
-                      labels={"state": "State", "avg_rating": "Avg Rating"})
-        fig2.add_hline(y=chain_avg, line_dash="dot", line_color="#60a5fa",
-                       annotation_text=f"Chain avg: {chain_avg:.2f} ⭐",
-                       annotation_position="top right")
-
-    fig2.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-    fig2.update_layout(height=360, margin=dict(l=0, r=0, t=20, b=0),
-                       plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                       coloraxis_showscale=False)
-    st.plotly_chart(fig2, width="stretch")
 
     # ── Rating trend ──────────────────────────────────────────────────────────
-    if reviews is not None and not reviews.empty and "date" in reviews.columns:
-        st.markdown("### 📈 Rating Trend Over Time")
-        rev_f = reviews.copy()
-        if sel_states and "state" in rev_f.columns:
-            rev_f = rev_f[rev_f["state"].isin(sel_states)]
+    st.markdown("### 📈 Rating Trend - Last 18 Months")
+    df_dated = df.dropna(subset=["date"]).copy()
+    if not df_dated.empty:
+        df_dated["month"] = df_dated["date"].dt.to_period("M").dt.to_timestamp()
+        cutoff = pd.Timestamp.now() - pd.DateOffset(months=18)
+        trend  = (df_dated[df_dated["month"] >= cutoff]
+                  .groupby(["month", "brand_name"])["stars"]
+                  .mean()
+                  .reset_index())
+        fig2 = px.line(
+            trend, x="month", y="stars", color="brand_name",
+            color_discrete_map=COLOR_MAP, markers=True,
+            labels={"month": "Month", "stars": "Avg Rating", "brand_name": "Brand"},
+        )
+        fig2.update_layout(
+            height=320, yaxis=dict(range=[1, 5.5]),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+        st.plotly_chart(fig2, width="stretch")
 
-        if not rev_f.empty:
-            if multi_brand and "brand_name" in rev_f.columns:
-                monthly = (rev_f.dropna(subset=["date"])
-                           .groupby([pd.Grouper(key="date", freq="ME"), "brand_name"])["stars"]
-                           .mean().reset_index())
-                monthly.columns = ["Month", "Brand", "Avg Rating"]
-                fig3 = px.line(monthly, x="Month", y="Avg Rating", color="Brand",
-                               line_shape="spline",
-                               color_discrete_sequence=["#3b82f6", "#10b981", "#f59e0b"])
-            else:
-                monthly = (rev_f.dropna(subset=["date"])
-                           .set_index("date")["stars"].resample("ME").mean().reset_index())
-                monthly.columns = ["Month", "Avg Rating"]
-                fig3 = px.line(monthly, x="Month", y="Avg Rating", line_shape="spline")
-                fig3.update_traces(line_color="#60a5fa", line_width=2.5)
+    st.markdown("---")
 
-            fig3.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0),
-                               plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                               yaxis=dict(range=[1, 5]))
-            st.plotly_chart(fig3, width="stretch")
+    # ── Review volume ─────────────────────────────────────────────────────────
+    st.markdown("### 📦 Review Volume")
+    vol = (df.groupby("brand_name")
+           .agg(reviews=("stars", "count"), avg_rating=("stars", "mean"))
+           .reset_index()
+           .sort_values("reviews", ascending=False))
+
+    fig3 = px.bar(
+        vol, x="brand_name", y="reviews",
+        color="brand_name", color_discrete_map=COLOR_MAP,
+        text="reviews",
+        labels={"brand_name": "Brand", "reviews": "Reviews Analyzed"},
+    )
+    fig3.update_traces(textposition="outside")
+    fig3.update_layout(
+        height=300, showlegend=False,
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig3, width="stretch")
+
+    st.markdown("---")
+
+    # ── AI Theme Comparison ───────────────────────────────────────────────────
+    st.markdown("### 🧠 AI Theme Analysis per Brand")
+    st.caption("Groq LLaMA surfaces the top 3 themes per brand so you can compare what each brand's customers care about.")
+
+    if st.button("Run AI Theme Comparison", type="primary"):
+        try:
+            client = get_groq_client()
+        except ValueError as e:
+            st.error(str(e))
+            return
+
+        for bid in brands_in_data:
+            bname = BRAND_MAP[bid]
+            bdf   = df[df["brand_id"] == bid].dropna(subset=["text"])
+            if bdf.empty:
+                continue
+
+            sample_parts = []
+            for stars in [1, 2, 3, 4, 5]:
+                bucket = bdf[bdf["stars"] == stars]["text"].tolist()
+                sample_parts.extend(bucket[:20])
+            sample_text = "\n".join(
+                [f"[{i+1}] {t[:200]}" for i, t in enumerate(sample_parts[:60])]
+            )
+
+            with st.expander(f"**{bname}** - Top 3 Themes",
+                             expanded=(bid == PRIMARY_BRAND_ID)):
+                with st.spinner(f"Analyzing {bname}..."):
+                    themes = get_ai_themes(bid, sample_text, client)
+                st.markdown(themes)
