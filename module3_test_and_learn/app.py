@@ -125,7 +125,7 @@ def show():
     fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0),
                       plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                       yaxis=dict(range=[1,5]), legend=dict(orientation="h",y=1.1))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     st.markdown("### Rating Distribution")
     star_data = pd.DataFrame({
@@ -138,7 +138,7 @@ def show():
                   labels={"Pct":"% of Reviews"})
     fig2.update_layout(height=260, margin=dict(l=0,r=0,t=10,b=0),
                        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width="stretch")
 
     if p >= 0.05:
         st.markdown("---")
